@@ -32,8 +32,7 @@
 // Maybe in the future we can check if the modules are loaded before try to load them
 #define HAS_LOADED_MODULES			(*(int*)0x000CE000)
 
-int delay = 0;
-int init = 0;
+int hasPatchedSif = 0;
 u8 membuffer[1024];
 
 // wad file descriptor and file size
@@ -47,6 +46,9 @@ int usbserv_id = 0;
 char * fWad = "dl/level%d.wad";
 char * fToc = "dl/level%d.toc";
 
+// 
+extern int _SifLoadModuleBuffer(void *ptr, int arg_len, const char *args, int *modres);
+
 //------------------------------------------------------------------------------
 void patch(void * funcPtr, u32 addr)
 {
@@ -56,7 +58,7 @@ void patch(void * funcPtr, u32 addr)
 }
 
 //------------------------------------------------------------------------------
-void Init(void)
+void patchSifRefs(void)
 {
 	// 
 	patch(&SifInitRpc, 0x00129D90);
@@ -72,30 +74,53 @@ void Init(void)
 	patch(&SifIopReset, 0x0012CC30);
 	patch(&SifIopSync, 0x0012CDB0);
 
-	if (HAS_LOADED_MODULES)
-		return;
+	patch(&_SifLoadModuleBuffer, 0x0012CBC0);
 
-	SifLoadFileInit();
-	SifInitRpc(0);
-
-	printf("Loading MASS: %d\n", usb_mass_id = SifExecModuleBuffer(&usb_mass_irx, size_usb_mass_irx, 0, NULL, NULL));
-	printf("Loading USBSERV: %d\n", usbserv_id = SifExecModuleBuffer(&usbserv_irx, size_usbserv_irx, 0, NULL, NULL));
-
-	SifLoadFileExit();
-
-	printf("rpcUSBInit: %d\n", rpcUSBInit());
-
-	HAS_LOADED_MODULES = 1;
+	hasPatchedSif = 1;
 }
 
 //------------------------------------------------------------------------------
-void Unload(void)
+void unload(void)
 {
 	if (usb_mass_id > 0)
 		SifUnloadModule(usb_mass_id);
 
 	if (usbserv_id > 0)
 		SifUnloadModule(usbserv_id);
+
+	HAS_LOADED_MODULES = 0;
+}
+
+//------------------------------------------------------------------------------
+void loadModules(void)
+{
+	if (HAS_LOADED_MODULES)
+		return;
+
+	// Patch 
+	patchSifRefs();
+
+	//
+	SifInitRpc(0);
+
+	// Load modules
+	printf("Loading MASS: %d\n", usb_mass_id = SifExecModuleBuffer(&usb_mass_irx, size_usb_mass_irx, 0, NULL, NULL));
+	printf("Loading USBSERV: %d\n", usbserv_id = SifExecModuleBuffer(&usbserv_irx, size_usbserv_irx, 0, NULL, NULL));
+
+	// 
+	printf("rpcUSBInit: %d\n", rpcUSBInit());
+
+	HAS_LOADED_MODULES = 1;
+}
+
+//------------------------------------------------------------------------------
+u64 loadHookFunc(u64 a0, u64 a1)
+{
+	// Load our usb modules
+	loadModules();
+
+	// Loads sound driver
+	return ((u64 (*)(u64, u64))0x001518C8)(a0, a1);
 }
 
 //--------------------------------------------------------------
@@ -263,7 +288,7 @@ void hookedLoad(u64 arg0, void * dest, u32 sectorStart, u32 sectorSize, u64 arg4
 	int levelId = *(u8*)0x00212694;
 
 	// Check if loading MP map
-	if (levelId >= 0x28)
+	if (levelId >= 0x28 && HAS_LOADED_MODULES && hasPatchedSif)
 	{
 		int fSize = openLevelUsb(levelId, tableDest);
 		if (fSize)
@@ -316,7 +341,14 @@ void Hook(void)
 {
 	u32 * hookloadAddr = (u32*)0x005CFB48;
 	u32 * hookcheckAddr = (u32*)0x005CF9B0;
+	u32 * loadModulesAddr = (u32*)0x00161364;
 	//u32 * getTableAddr = (u32*)0x00686514;
+
+	// For some reason we can't load the IRX modules whenever we want
+	// So here we hook into when the game uses rpc calls
+	// This triggers when entering the online profile select, leaving profile select, and logging out.
+	if (*loadModulesAddr == 0x0C054632)
+		*loadModulesAddr = 0x0C000000 | ((u32)(&loadHookFunc) / 4);
 
 	if (*hookloadAddr == 0x0C058E10)
 	{
@@ -329,26 +361,12 @@ void Hook(void)
 //------------------------------------------------------------------------------
 int main (void)
 {
-	// For some reason DL on PS2 freezes when exiting the profile select screen
-	// This gives us some time to leave first
-	if (delay < 1000)
-	{
-		++delay;
-		return 0;
-	}
+	// 
+	if (!hasPatchedSif)
+		patchSifRefs();
 
 	// Install level loading hooks
 	Hook();
-
-	// Load iop modules
-	if (!init)
-	{
-		Init();
-		init = 1;
-	}
-
-	// Change bg color to blue
-	*((vu32*)0x120000e0) = 0xB41010;
 
 	return 0;
 }
