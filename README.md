@@ -1,2 +1,2 @@
-# deadlocked-map-loader
-Allows loading custom wads from USB for Deadlocked PS2.
+# deadlocked-patch
+Patches applied to all Deadlocked PS2 clients connecting to the Deadlocked custom server.
