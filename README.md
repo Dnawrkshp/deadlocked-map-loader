@@ -40,7 +40,7 @@ Loads USB FS drivers and hooks into Deadlocked's level loader to reroute CDVD re
 6. Then just cd into the src folder and make
 
     ```cd src```
-    
+
     ```make```
 
 ## Running
@@ -51,4 +51,4 @@ To run, you must install a hook that calls the entrypoint at 0x000D0000.
 
 ## Future Plans
 
-To make this more accessible I'd like to make a launcher that installs this into the kernel and hooks the IOP reset. 
+Running this requires a complex setup using my deadlocked medius server. To make this more accessible I'd like to make a launcher that installs this into the kernel and hooks the IOP reset. 
