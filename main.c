@@ -31,12 +31,14 @@
 // If we didn't do this, it'd try to load the IRX modules twice
 // Maybe in the future we can check if the modules are loaded before try to load them
 #define HAS_LOADED_MODULES			(*(int*)0x000CE000)
+#define LEVEL_ID					(*(u8*)0x00212694)
 
 int hasPatchedSif = 0;
 u8 membuffer[1024];
 
 // wad file descriptor and file size
 int level_fd = -1;
+int level_loading_id = -1;
 int level_file_size = 0;
 
 int usb_mass_id = 0;
@@ -45,9 +47,14 @@ int usbserv_id = 0;
 // paths for level specific wad and toc
 char * fWad = "dl/level%d.wad";
 char * fToc = "dl/level%d.toc";
+char * fBg = "dl/level%d.bg";
+char * fMap = "dl/level%d.map";
 
 // 
 extern int _SifLoadModuleBuffer(void *ptr, int arg_len, const char *args, int *modres);
+
+//
+void Hook(void);
 
 //------------------------------------------------------------------------------
 void patch(void * funcPtr, u32 addr)
@@ -77,6 +84,7 @@ void patchSifRefs(void)
 	patch(&_SifLoadModuleBuffer, 0x0012CBC0);
 
 	hasPatchedSif = 1;
+	printf("map loader initialized\n");
 }
 
 //------------------------------------------------------------------------------
@@ -166,8 +174,6 @@ int readUsb(char *filename, u8 * buf, int size)
 		printf("error reading from file.\n");
 		goto finish;
 	}
-
-	// Wait for IOP
 	rpcUSBSync(0, NULL, &r);
 
 finish:
@@ -178,7 +184,147 @@ finish:
 }
 
 //--------------------------------------------------------------
-int openLevelUsb(int levelId, void * tocDest)
+int getLevelSizeUsb(int levelId)
+{
+	int fd = -1;
+
+	// Generate wad filename
+	sprintf(membuffer, fWad, levelId);
+
+	// open wad file
+	rpcUSBopen(membuffer, FIO_O_RDONLY);
+	rpcUSBSync(0, NULL, &fd);
+	
+	// Ensure wad successfully opened
+	if (fd < 0)
+	{
+		printf("error opening file (%s): %d\n", membuffer, fd);
+		return 0;									
+	}
+
+	// Get length of file
+	rpcUSBseek(fd, 0, SEEK_END);
+	rpcUSBSync(0, NULL, &level_file_size);
+
+	// Check the file has a valid size
+	if (level_file_size <= 0)
+	{
+		printf("error seeking file (%s): %d\n", membuffer, level_file_size);
+		rpcUSBclose(fd);
+		rpcUSBSync(0, NULL, NULL);
+		fd = -1;
+		return 0;
+	}
+
+	// Close toc
+	rpcUSBclose(fd);
+	rpcUSBSync(0, NULL, NULL);
+
+	return level_file_size;
+}
+
+//--------------------------------------------------------------
+int readLevelMapUsb(int levelId, u8 * buf, int size)
+{
+	int r, fd, fSize;
+
+	// Generate toc filename
+	sprintf(membuffer, fMap, levelId);
+
+	// Open
+	rpcUSBopen(membuffer, FIO_O_RDONLY);
+	rpcUSBSync(0, NULL, &fd);
+
+	// Ensure the toc was opened successfully
+	if (fd < 0)
+	{
+		printf("error opening file (%s): %d\n", membuffer, fd);
+		return 0;	
+	}
+	
+	// Get length of file
+	rpcUSBseek(fd, 0, SEEK_END);
+	rpcUSBSync(0, NULL, &fSize);
+
+	// Check the file has a valid size
+	if (fSize <= 0)
+	{
+		printf("error seeking file (%s): %d\n", membuffer, fSize);
+		rpcUSBclose(fd);
+		rpcUSBSync(0, NULL, NULL);
+		return 0;
+	}
+
+	// Go back to start of file
+	rpcUSBseek(fd, 0, SEEK_SET);
+	rpcUSBSync(0, NULL, NULL);
+
+	// clamp size to be no larger than file size
+	if (size > fSize)
+		size = fSize;
+
+	// Read map
+	if (rpcUSBread(fd, buf, size) != 0)
+	{
+		printf("error reading from file.\n");
+		rpcUSBclose(fd);
+		rpcUSBSync(0, NULL, NULL);
+		return 0;
+	}
+	rpcUSBSync(0, NULL, &r);
+
+	// Close toc
+	rpcUSBclose(fd);
+	rpcUSBSync(0, NULL, NULL);
+
+	return 1;
+}
+
+//--------------------------------------------------------------
+int readLevelBgUsb(int levelId, u8 * buf, int size)
+{
+	int r, fd;
+
+	// Ensure a wad isn't already open
+	if (level_fd >= 0)
+	{
+		printf("openLevelUsb(%d) called but a file is already open (%d)!", levelId, level_fd);
+		return 0;
+	}
+
+	// Generate toc filename
+	sprintf(membuffer, fBg, levelId);
+
+	// Open
+	rpcUSBopen(membuffer, FIO_O_RDONLY);
+	rpcUSBSync(0, NULL, &fd);
+
+	// Ensure the toc was opened successfully
+	if (fd < 0)
+	{
+		printf("error opening file (%s): %d\n", membuffer, fd);
+		return 0;	
+	}
+
+	// Read bg
+	if (rpcUSBread(fd, buf, size) != 0)
+	{
+		printf("error reading from file.\n");
+		rpcUSBclose(fd);
+		rpcUSBSync(0, NULL, NULL);
+		return 0;
+	}
+	rpcUSBSync(0, NULL, &r);
+
+	// Close toc
+	rpcUSBclose(fd);
+	rpcUSBSync(0, NULL, NULL);
+
+	return 1;
+}
+
+//--------------------------------------------------------------
+int readLevelTocUsb(int levelId, void * tocDest)
 {
 	int r, fdToc;
 
@@ -209,7 +355,6 @@ int openLevelUsb(int levelId, void * tocDest)
 		printf("error reading from file.\n");
 		rpcUSBclose(fdToc);
 		rpcUSBSync(0, NULL, NULL);
-		level_fd = -1;
 		return 0;
 	}
 	rpcUSBSync(0, NULL, &r);
@@ -217,6 +362,19 @@ int openLevelUsb(int levelId, void * tocDest)
 	// Close toc
 	rpcUSBclose(fdToc);
 	rpcUSBSync(0, NULL, NULL);
+
+	return 1;
+}
+
+//--------------------------------------------------------------
+int openLevelUsb(int levelId)
+{
+	// Ensure a wad isn't already open
+	if (level_fd >= 0)
+	{
+		printf("openLevelUsb(%d) called but a file is already open (%d)!", levelId, level_fd);
+		return 0;
+	}
 
 	// Generate wad filename
 	sprintf(membuffer, fWad, levelId);
@@ -243,6 +401,7 @@ int openLevelUsb(int levelId, void * tocDest)
 		rpcUSBclose(level_fd);
 		rpcUSBSync(0, NULL, NULL);
 		level_fd = -1;
+		level_loading_id = -1;
 		return 0;
 	}
 
@@ -282,15 +441,14 @@ int readLevelUsb(u8 * buf)
 //------------------------------------------------------------------------------
 void hookedLoad(u64 arg0, void * dest, u32 sectorStart, u32 sectorSize, u64 arg4, u64 arg5, u64 arg6)
 {
+	int levelId = LEVEL_ID;
+
 	void (*cdvdLoad)(u64, void*, u32, u32, u64, u64, u64) = (void (*)(u64, void*, u32, u32, u64, u64, u64))0x00163840;
 
-	void * tableDest = (void*)0x001CEBF0;
-	int levelId = *(u8*)0x00212694;
-
 	// Check if loading MP map
-	if (levelId >= 0x28 && HAS_LOADED_MODULES && hasPatchedSif)
+	if (levelId == level_loading_id && level_loading_id > 0x28 && HAS_LOADED_MODULES && hasPatchedSif)
 	{
-		int fSize = openLevelUsb(levelId, tableDest);
+		int fSize = openLevelUsb(levelId);
 		if (fSize)
 		{
 			if (readLevelUsb(dest) > 0)
@@ -337,12 +495,85 @@ u32 hookedCheck(void)
 }
 
 //------------------------------------------------------------------------------
+void hookedLoadingScreen(u64 a0, void * a1, u64 a2, u64 a3, u64 t0, u64 t1, u64 t2)
+{
+	int levelId = LEVEL_ID;
+
+	if (readLevelBgUsb(levelId, a1, a3 * 0x800) > 0)
+	{
+
+	}
+	else
+	{
+		((void (*)(u64, void *, u64, u64, u64, u64, u64))0x00163808)(a0, a1, a2, a3, t0, t1, t2);
+	}
+}
+
+//------------------------------------------------------------------------------
+void hookedGetTable(u32 startSector, u32 sectorCount, u8 * dest, u32 levelId)
+{
+	// reset
+	level_loading_id = -1;
+
+	// Check if loading MP map
+	if (levelId >= 0x28 && HAS_LOADED_MODULES && hasPatchedSif)
+	{
+		if (readLevelTocUsb(levelId, dest))
+		{
+			level_loading_id = levelId;
+			return;
+		}
+	}
+	
+	// load table
+	((void (*)(u32,u32,void*))0x00159A00)(startSector, sectorCount, dest);
+}
+
+//------------------------------------------------------------------------------
+void hookedGetMap(u64 a0, void * dest, u32 startSector, u32 sectorCount, u64 t0, u64 t1, u64 t2)
+{
+	int levelId = LEVEL_ID;
+
+	// Check if loading MP map
+	if (levelId >= 0x28 && HAS_LOADED_MODULES && hasPatchedSif)
+	{
+		// We hardcode the size because that's the max that deadlocked can hold
+		if (readLevelMapUsb(levelId, dest, 0x27400))
+			return;
+	}
+
+	((void (*)(u64, void*,u32,u32,u64,u64,u64))0x00163808)(a0, dest, startSector, sectorCount, t0, t1, t2);
+}
+
+//------------------------------------------------------------------------------
+void hookedGetAudio(u64 a0, void * dest, u32 startSector, u32 sectorCount, u64 t0, u64 t1, u64 t2)
+{
+	((void (*)(u64, void*,u32,u32,u64,u64,u64))0x00163808)(a0, dest, startSector, sectorCount, t0, t1, t2);
+}
+
+//------------------------------------------------------------------------------
+u64 hookedLoadCdvd(u64 a0, u64 a1, u64 a2, u64 a3, u64 t0, u64 t1, u64 t2)
+{
+	u64 result = ((u64 (*)(u64,u64,u64,u64,u64,u64,u64))0x00163840)(a0, a1, a2, a3, t0, t1, t2);
+
+	// We try and hook here to just to make sure that after tha game loads
+	// We can still load our custom minimap
+	Hook();
+
+	return result;
+}
+
+//------------------------------------------------------------------------------
 void Hook(void)
 {
 	u32 * hookloadAddr = (u32*)0x005CFB48;
 	u32 * hookcheckAddr = (u32*)0x005CF9B0;
 	u32 * loadModulesAddr = (u32*)0x00161364;
-	//u32 * getTableAddr = (u32*)0x00686514;
+	u32 * hookloadingScreenAddr = (u32*)0x00705554;
+	u32 * getTableAddr = (u32*)0x00159B20;
+	u32 * getMapAddr = (u32*)0x00557580;
+	u32 * getAudioAddr = (u32*)0x0053F970;
+	u32 * loadCdvdAddr = (u32*)0x00163814;
 
 	// For some reason we can't load the IRX modules whenever we want
 	// So here we hook into when the game uses rpc calls
@@ -352,10 +583,16 @@ void Hook(void)
 
 	if (*hookloadAddr == 0x0C058E10)
 	{
-		//*getTableAddr = 0x0C000000 | ((u32)(&hookedGetTable) / 4);
+		*getTableAddr = 0x0C000000 | ((u32)(&hookedGetTable) / 4);
 		*hookloadAddr = 0x0C000000 | ((u32)(&hookedLoad) / 4);
 		*hookcheckAddr = 0x0C000000 | ((u32)(&hookedCheck) / 4);
+		*hookloadingScreenAddr = 0x0C000000 | ((u32)&hookedLoadingScreen / 4);
+		*loadCdvdAddr = 0x0C000000 | ((u32)&hookedLoadCdvd / 4);
 	}
+
+	// These get hooked after the map loads but before the game starts
+	if (*getMapAddr == 0x0C058E02)
+		*getMapAddr = 0x0C000000 | ((u32)(&hookedGetMap) / 4);
 }
 
 //------------------------------------------------------------------------------
